@@ -497,6 +497,24 @@ func TestConfigRejectsUnsupportedCarrier(t *testing.T) {
 	}
 }
 
+func TestParsePeerSummaryLine(t *testing.T) {
+	count, devices, ok := parsePeerSummaryLine("2026/06/14 12:00:00 Current peers count: 2, Devices: [dev-b, dev-a]")
+	if !ok {
+		t.Fatal("parsePeerSummaryLine ok=false")
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+	if strings.Join(devices, ",") != "dev-b,dev-a" {
+		t.Fatalf("devices = %#v", devices)
+	}
+
+	count, devices, ok = parsePeerSummaryLine("Current peers count: 0, Devices: []")
+	if !ok || count != 0 || len(devices) != 0 {
+		t.Fatalf("empty summary = count %d devices %#v ok %v", count, devices, ok)
+	}
+}
+
 func TestConfigRejectsIncompleteProxy(t *testing.T) {
 	loc := testLocation("room-01", "Proxy")
 	loc.Proxy = Socks5Proxy{Port: 1080}

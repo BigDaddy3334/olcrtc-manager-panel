@@ -44,6 +44,9 @@ type RuntimeState = {
   exited_at?: string;
   exit_error?: string;
   log_count: number;
+  restarts?: number;
+  peer_count?: number;
+  peer_devices?: string[];
 };
 
 type LogLine = {
@@ -79,6 +82,7 @@ type State = {
   subscription_path: string;
   client_count: number;
   running_count: number;
+  peer_count: number;
   clients: ClientState[];
 };
 
@@ -1596,10 +1600,11 @@ function App() {
       </header>
 
       <main className="mx-auto max-w-7xl px-5 py-6">
-        <section className="grid gap-3 md:grid-cols-3">
+        <section className="grid gap-3 md:grid-cols-4">
           <StatCard icon={<Server className="h-4 w-4" />} label="Профиль" value={state?.name ?? "..."} />
           <StatCard icon={<Users className="h-4 w-4" />} label="Клиенты" value={state?.client_count ?? "..."} />
           <StatCard icon={<Activity className="h-4 w-4" />} label="Инстансы" value={state?.running_count ?? "..."} />
+          <StatCard icon={<Users className="h-4 w-4" />} label="Peers" value={state?.peer_count ?? "..."} />
         </section>
 
         <section className="mt-4 rounded-lg border border-border bg-card p-4">
@@ -1692,7 +1697,7 @@ function App() {
                         </button>
                       </div>
                       <div className="overflow-x-auto">
-                        <table className="w-full min-w-[920px] border-collapse text-sm">
+                        <table className="w-full min-w-[980px] border-collapse text-sm">
                           <thead>
                             <tr className="border-b border-border text-left text-muted-foreground">
                               <th className="py-2 pr-3 font-medium">Локация</th>
@@ -1701,6 +1706,7 @@ function App() {
                               <th className="py-2 pr-3 font-medium">Transport</th>
                               <th className="py-2 pr-3 font-medium">DNS</th>
                               <th className="py-2 pr-3 font-medium">Статус</th>
+                              <th className="py-2 pr-3 font-medium">Peers</th>
                               <th className="py-2 text-right font-medium">Действия локации</th>
                             </tr>
                           </thead>
@@ -1720,6 +1726,9 @@ function App() {
                                   >
                                     {loc.runtime.status}
                                   </span>
+                                </td>
+                                <td className="py-3 pr-3 text-muted-foreground" title={loc.runtime.peer_devices?.join(", ")}>
+                                  {loc.runtime.peer_count ?? "-"}
                                 </td>
                                 <td className="py-3 text-right">
                                   <div className="flex flex-wrap justify-end gap-2">

@@ -770,12 +770,16 @@ func (s *Supervisor) State() State {
 	defer s.mu.RUnlock()
 
 	clients := make(map[string][]LocationState)
+	peerCount := 0
 	for _, loc := range s.cfg.Locations {
 		key := locationKey(loc)
 		p, exists := s.processes[key]
 		runtime := RuntimeState{Status: "stopped"}
 		if exists {
 			runtime = p.state()
+		}
+		if runtime.PeerCount != nil {
+			peerCount += *runtime.PeerCount
 		}
 		clients[loc.ClientID] = append(clients[loc.ClientID], LocationState{
 			Name:      loc.Name,
@@ -809,6 +813,7 @@ func (s *Supervisor) State() State {
 		Refresh:          s.cfg.Refresh,
 		ClientCount:      len(clientIDs),
 		RunningCount:     s.runningCountLocked(),
+		PeerCount:        peerCount,
 		Clients:          make([]ClientState, 0, len(clientIDs)),
 	}
 	for _, id := range clientIDs {
@@ -1002,6 +1007,7 @@ type State struct {
 	Refresh          string        `json:"refresh,omitempty"`
 	ClientCount      int           `json:"client_count"`
 	RunningCount     int           `json:"running_count"`
+	PeerCount        int           `json:"peer_count"`
 	Clients          []ClientState `json:"clients"`
 }
 
@@ -1028,15 +1034,17 @@ type LocationState struct {
 }
 
 type RuntimeState struct {
-	Status      string `json:"status"`
-	Running     bool   `json:"running"`
-	PID         int    `json:"pid,omitempty"`
-	MemoryBytes uint64 `json:"memory_bytes,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
-	ExitedAt    string `json:"exited_at,omitempty"`
-	ExitError   string `json:"exit_error,omitempty"`
-	LogCount    int    `json:"log_count"`
-	Restarts    int    `json:"restarts"`
+	Status      string   `json:"status"`
+	Running     bool     `json:"running"`
+	PID         int      `json:"pid,omitempty"`
+	MemoryBytes uint64   `json:"memory_bytes,omitempty"`
+	StartedAt   string   `json:"started_at,omitempty"`
+	ExitedAt    string   `json:"exited_at,omitempty"`
+	ExitError   string   `json:"exit_error,omitempty"`
+	LogCount    int      `json:"log_count"`
+	Restarts    int      `json:"restarts"`
+	PeerCount   *int     `json:"peer_count,omitempty"`
+	PeerDevices []string `json:"peer_devices,omitempty"`
 }
 
 type LogLine struct {
@@ -2028,6 +2036,61 @@ func (b *logBuffer) Count() int {
 	return b.next
 }
 
+func (b *logBuffer) PeerSummary() (int, []string, bool) {
+	lines := b.Snapshot()
+	for i := len(lines) - 1; i >= 0; i-- {
+		if count, devices, ok := parsePeerSummaryLine(lines[i].Line); ok {
+			return count, devices, true
+		}
+	}
+	return 0, nil, false
+}
+
+func parsePeerSummaryLine(line string) (int, []string, bool) {
+	const countMarker = "Current peers count:"
+	idx := strings.Index(line, countMarker)
+	if idx < 0 {
+		return 0, nil, false
+	}
+	rest := strings.TrimSpace(line[idx+len(countMarker):])
+	countText, tail, ok := strings.Cut(rest, ",")
+	if !ok {
+		return 0, nil, false
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(countText))
+	if err != nil || count < 0 {
+		return 0, nil, false
+	}
+
+	const devicesMarker = "Devices:"
+	idx = strings.Index(tail, devicesMarker)
+	if idx < 0 {
+		return 0, nil, false
+	}
+	devicesText := strings.TrimSpace(tail[idx+len(devicesMarker):])
+	if !strings.HasPrefix(devicesText, "[") {
+		return 0, nil, false
+	}
+	end := strings.Index(devicesText, "]")
+	if end < 0 {
+		return 0, nil, false
+	}
+	devicesText = strings.TrimSpace(devicesText[1:end])
+	if devicesText == "" {
+		return count, nil, true
+	}
+
+	rawDevices := strings.Split(devicesText, ",")
+	devices := make([]string, 0, len(rawDevices))
+	for _, device := range rawDevices {
+		device = strings.TrimSpace(device)
+		if device != "" {
+			devices = append(devices, device)
+		}
+	}
+	return count, devices, true
+}
+
 type logWriter struct {
 	stream string
 	buffer *logBuffer
@@ -2062,6 +2125,10 @@ func (p *process) state() RuntimeState {
 	}
 	if p.exitErr != "" {
 		state.ExitError = p.exitErr
+	}
+	if count, devices, ok := p.logs.PeerSummary(); ok {
+		state.PeerCount = &count
+		state.PeerDevices = devices
 	}
 	if p.cmd != nil && p.cmd.Process != nil && p.running {
 		state.PID = p.cmd.Process.Pid
