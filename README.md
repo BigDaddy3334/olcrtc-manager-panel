@@ -56,7 +56,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o olcrtc-manager ./cmd/olcrtc-ma
 Чистая установка на Debian/Ubuntu VPS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/BigDaddy3334/olcrtc-manager-panel/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/oleg54644/olcrtc-manager-panel-GM/main/scripts/install.sh | sudo bash
 ```
 
 Установщик:
@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/BigDaddy3334/olcrtc-manager-panel/m
 По умолчанию сервис слушает `0.0.0.0:<random-port>`, включает HTTPS с самоподписанным сертификатом и сразу доступен по внешнему IP VPS. Чтобы оставить панель только на localhost для nginx/reverse proxy:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/BigDaddy3334/olcrtc-manager-panel/main/scripts/install.sh | sudo env PANEL_ADDR=127.0.0.1 bash
+curl -fsSL https://raw.githubusercontent.com/oleg54644/olcrtc-manager-panel-GM/main/scripts/install.sh | sudo env PANEL_ADDR=127.0.0.1 bash
 ```
 
 Установщик создает случайные логин и пароль администратора и выводит их в конце установки. Откройте выведенный установщиком URL и войдите с этими данными. Если панель опубликована напрямую, смените пароль после входа и ограничьте доступ файрволом при необходимости.
@@ -82,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/BigDaddy3334/olcrtc-manager-panel/m
 Опции установщика можно передавать через переменные окружения:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/BigDaddy3334/olcrtc-manager-panel/main/scripts/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/oleg54644/olcrtc-manager-panel-GM/main/scripts/install.sh | \
   sudo env PANEL_PORT=9443 bash
 ```
 

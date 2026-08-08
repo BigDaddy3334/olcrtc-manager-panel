@@ -19,7 +19,7 @@ random_port() {
 	printf '%s\n' 8888
 }
 
-PANEL_REPO="${PANEL_REPO:-https://github.com/BigDaddy3334/olcrtc-manager-panel.git}"
+PANEL_REPO="${PANEL_REPO:-https://github.com/oleg54644/olcrtc-manager-panel-GM.git}"
 PANEL_REF="${PANEL_REF:-main}"
 OLCRTC_REPO="${OLCRTC_REPO:-https://github.com/openlibrecommunity/olcrtc.git}"
 OLCRTC_REF="${OLCRTC_REF:-master}"
@@ -349,7 +349,7 @@ install_service() {
 	cat > /etc/systemd/system/olcrtc-manager.service <<EOF
 [Unit]
 Description=OlcRTC Manager Panel
-Documentation=https://github.com/BigDaddy3334/olcrtc-manager-panel
+Documentation=https://github.com/oleg54644/olcrtc-manager-panel-GM
 After=network-online.target
 Wants=network-online.target
 

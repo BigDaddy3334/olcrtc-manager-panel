@@ -2,13 +2,23 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ChevronRight,
   Copy,
+  Cpu,
   Edit3,
+  Eye,
+  EyeOff,
+  Gauge,
+  Globe,
+  HardDrive,
   KeyRound,
   LogOut,
   Lock,
+  MemoryStick,
+  Network,
   Plus,
   RefreshCw,
   Server,
@@ -16,6 +26,7 @@ import {
   Terminal,
   Trash2,
   Users,
+  Waves,
   X,
 } from "lucide-react";
 import "./index.css";
@@ -115,6 +126,59 @@ type Metrics = {
     name: string;
     runtime: RuntimeState;
   }>;
+  host?: HostMetrics;
+};
+
+type NetSample = {
+  time: string;
+  rx_rate_bytes_sec: number;
+  tx_rate_bytes_sec: number;
+};
+
+type HostMetrics = {
+  cpu: {
+    usage_percent: number;
+    cores: number;
+    threads: number;
+    model_name?: string;
+    mhz?: number;
+  };
+  memory: {
+    total_bytes: number;
+    used_bytes: number;
+    percent: number;
+  };
+  swap: {
+    total_bytes: number;
+    used_bytes: number;
+    percent: number;
+  };
+  disk: {
+    path: string;
+    total_bytes: number;
+    used_bytes: number;
+    free_bytes: number;
+    percent: number;
+  };
+  network: {
+    rx_bytes_total: number;
+    tx_bytes_total: number;
+    rx_rate_bytes_sec: number;
+    tx_rate_bytes_sec: number;
+    rx_peak_bytes_sec: number;
+    tx_peak_bytes_sec: number;
+    history: NetSample[];
+  };
+  connections: {
+    tcp: number;
+    udp: number;
+    total: number;
+  };
+  uptime: {
+    os_uptime_seconds: number;
+    manager_uptime_seconds: number;
+  };
+  addresses: string[];
 };
 
 type AuditEvent = {
@@ -289,6 +353,31 @@ function formatBytes(bytes?: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const BYTE_UNITS = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+
+function formatBytesAdaptive(bytes?: number, digits = 2) {
+  if (bytes === undefined || bytes === null || Number.isNaN(bytes)) return "—";
+  if (bytes === 0) return `0 ${BYTE_UNITS[0]}`;
+  const exponent = Math.min(BYTE_UNITS.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** exponent;
+  return `${value.toFixed(exponent === 0 ? 0 : digits)} ${BYTE_UNITS[exponent]}`;
+}
+
+function formatRate(bytesPerSec?: number) {
+  if (bytesPerSec === undefined || bytesPerSec === null || Number.isNaN(bytesPerSec)) return "—";
+  return `${formatBytesAdaptive(bytesPerSec, 1)}/с`;
+}
+
+function formatDuration(seconds?: number) {
+  if (!seconds || seconds <= 0) return "—";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}д ${hours}ч`;
+  if (hours > 0) return `${hours}ч ${minutes}м`;
+  return `${minutes}м`;
+}
+
 function subscriptionURL(clientID: string, subscriptionPath?: string) {
   const path = subscriptionPath?.trim().replace(/^\/+|\/+$/g, "") || "sub";
   const prefix = path ? `/${path}` : "";
@@ -425,6 +514,253 @@ function HeaderMetric({ label, value }: { label: string; value: React.ReactNode 
       <div className="text-[10px] uppercase leading-3 text-muted-foreground">{label}</div>
       <div className="text-sm font-semibold leading-4">{value}</div>
     </div>
+  );
+}
+
+function ResourceGauge({
+  icon,
+  label,
+  percent,
+  primaryLine,
+  secondaryLeft,
+  secondaryRight,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  percent?: number;
+  primaryLine: React.ReactNode;
+  secondaryLeft?: string;
+  secondaryRight?: string;
+}) {
+  const pct = Math.max(0, Math.min(100, percent ?? 0));
+  const barColor = pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-amber-400" : "bg-primary";
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        {icon}
+        <span className="uppercase tracking-wide text-xs">{label}</span>
+      </div>
+      <div className="mt-2 flex items-baseline gap-1">
+        <span className="text-2xl font-semibold tracking-normal">{percent !== undefined ? pct.toFixed(1) : "…"}</span>
+        {percent !== undefined && <span className="text-sm text-muted-foreground">%</span>}
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">{primaryLine}</div>
+      <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div className={`h-full rounded-full ${barColor} transition-all`} style={{ width: `${pct}%` }} />
+      </div>
+      {(secondaryLeft || secondaryRight) && (
+        <div className="mt-1.5 flex items-center justify-between text-[10px] uppercase text-muted-foreground">
+          <span>{secondaryLeft}</span>
+          <span>{secondaryRight}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NetworkSparkline({ history }: { history: NetSample[] }) {
+  const width = 720;
+  const height = 160;
+  const padding = 4;
+
+  if (!history.length) {
+    return (
+      <div className="grid h-40 place-items-center text-xs text-muted-foreground">
+        Собираем данные…
+      </div>
+    );
+  }
+
+  const maxRate = Math.max(1, ...history.map((s) => Math.max(s.rx_rate_bytes_sec, s.tx_rate_bytes_sec)));
+  const points = (key: "rx_rate_bytes_sec" | "tx_rate_bytes_sec") =>
+    history
+      .map((sample, index) => {
+        const x = history.length > 1 ? (index / (history.length - 1)) * (width - padding * 2) + padding : padding;
+        const y = height - padding - (sample[key] / maxRate) * (height - padding * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+
+  const rxPoints = points("rx_rate_bytes_sec");
+  const rxArea = `${padding},${height - padding} ${rxPoints} ${width - padding},${height - padding}`;
+  const txPoints = points("tx_rate_bytes_sec");
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-40 w-full" preserveAspectRatio="none">
+      <line x1={padding} y1={height * 0.25} x2={width - padding} y2={height * 0.25} stroke="hsl(214 20% 22%)" strokeDasharray="4 4" strokeWidth={1} />
+      <line x1={padding} y1={height * 0.75} x2={width - padding} y2={height * 0.75} stroke="hsl(214 20% 22%)" strokeDasharray="4 4" strokeWidth={1} />
+      <polygon points={rxArea} fill="hsl(172 72% 44%)" fillOpacity={0.15} />
+      <polyline points={rxPoints} fill="none" stroke="hsl(172 72% 44%)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      <polyline points={txPoints} fill="none" stroke="hsl(210 22% 70%)" strokeWidth={1.5} strokeDasharray="3 3" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function HostingStatsPanel({ host, managerMemBytes, goroutines }: { host?: HostMetrics; managerMemBytes?: number; goroutines?: number }) {
+  const [ipVisible, setIpVisible] = useState(false);
+
+  return (
+    <section className="mt-4">
+      <h2 className="mb-3 text-lg font-semibold tracking-normal">Статистика хостинга</h2>
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <ResourceGauge
+          icon={<Cpu className="h-4 w-4" />}
+          label="ЦП"
+          percent={host?.cpu.usage_percent}
+          primaryLine={`${host?.cpu.cores ?? "…"} ядер / ${host?.cpu.threads ?? "…"} потоков${
+            host?.cpu.mhz ? ` · ${(host.cpu.mhz / 1000).toFixed(2)} ГГц` : ""
+          }`}
+        />
+        <ResourceGauge
+          icon={<MemoryStick className="h-4 w-4" />}
+          label="Память"
+          percent={host?.memory.percent}
+          primaryLine={`${formatBytesAdaptive(host?.memory.used_bytes)} / ${formatBytesAdaptive(host?.memory.total_bytes)}`}
+        />
+        <ResourceGauge
+          icon={<Waves className="h-4 w-4" />}
+          label="Подкачка"
+          percent={host?.swap.percent}
+          primaryLine={
+            host?.swap.total_bytes
+              ? `${formatBytesAdaptive(host.swap.used_bytes)} / ${formatBytesAdaptive(host.swap.total_bytes)}`
+              : "не настроена"
+          }
+        />
+        <ResourceGauge
+          icon={<HardDrive className="h-4 w-4" />}
+          label="Диск"
+          percent={host?.disk.percent}
+          primaryLine={`${formatBytesAdaptive(host?.disk.used_bytes)} / ${formatBytesAdaptive(host?.disk.total_bytes)}`}
+          secondaryLeft={host ? `свободно ${formatBytesAdaptive(host.disk.free_bytes)}` : undefined}
+        />
+      </div>
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted-foreground">Скорость сети</div>
+              <div className="text-[11px] text-muted-foreground">Суммарно по всем интерфейсам</div>
+            </div>
+            <div className="flex items-center gap-4 text-sm">
+              <span className="flex items-center gap-1 text-primary">
+                <ArrowDown className="h-3.5 w-3.5" /> {formatRate(host?.network.rx_rate_bytes_sec)}
+              </span>
+              <span className="flex items-center gap-1 text-muted-foreground">
+                <ArrowUp className="h-3.5 w-3.5" /> {formatRate(host?.network.tx_rate_bytes_sec)}
+              </span>
+            </div>
+          </div>
+          <div className="mt-2">
+            <NetworkSparkline history={host?.network.history ?? []} />
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground sm:grid-cols-4">
+            <div>
+              <div className="uppercase">Пик ↓</div>
+              <div className="text-foreground">{formatRate(host?.network.rx_peak_bytes_sec)}</div>
+            </div>
+            <div>
+              <div className="uppercase">Пик ↑</div>
+              <div className="text-foreground">{formatRate(host?.network.tx_peak_bytes_sec)}</div>
+            </div>
+            <div>
+              <div className="uppercase">Получено всего</div>
+              <div className="text-foreground">{formatBytesAdaptive(host?.network.rx_bytes_total)}</div>
+            </div>
+            <div>
+              <div className="uppercase">Отправлено всего</div>
+              <div className="text-foreground">{formatBytesAdaptive(host?.network.tx_bytes_total)}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+            <Network className="h-4 w-4" />
+            Количество соединений
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-semibold tracking-normal">{host?.connections.total ?? "…"}</span>
+            <span className="text-xs text-muted-foreground">открытых сокетов</span>
+          </div>
+          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted">
+            {host && host.connections.total > 0 && (
+              <div className="flex h-full">
+                <div className="h-full bg-primary" style={{ width: `${(host.connections.tcp / host.connections.total) * 100}%` }} />
+                <div className="h-full bg-muted-foreground/60" style={{ width: `${(host.connections.udp / host.connections.total) * 100}%` }} />
+              </div>
+            )}
+          </div>
+          <div className="mt-2 flex items-center justify-between text-sm">
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-primary" /> TCP {host?.connections.tcp ?? "…"}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-muted-foreground/60" /> UDP {host?.connections.udp ?? "…"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+            <Gauge className="h-4 w-4" />
+            Время работы
+          </div>
+          <div className="mt-2 flex justify-between text-sm">
+            <span className="text-muted-foreground">Менеджер</span>
+            <span className="font-medium">{formatDuration(host?.uptime.manager_uptime_seconds)}</span>
+          </div>
+          <div className="mt-1 flex justify-between text-sm">
+            <span className="text-muted-foreground">ОС</span>
+            <span className="font-medium">{formatDuration(host?.uptime.os_uptime_seconds)}</span>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+            <Activity className="h-4 w-4" />
+            Внутренний процесс
+          </div>
+          <div className="mt-2 flex justify-between text-sm">
+            <span className="text-muted-foreground">Память панели</span>
+            <span className="font-medium">{formatBytes(managerMemBytes)}</span>
+          </div>
+          <div className="mt-1 flex justify-between text-sm">
+            <span className="text-muted-foreground">Горутины</span>
+            <span className="font-medium">{goroutines ?? "…"}</span>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+              <Globe className="h-4 w-4" />
+              IP-адреса сервера
+            </div>
+            <button
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => setIpVisible((v) => !v)}
+              title={ipVisible ? "Скрыть" : "Показать"}
+              type="button"
+            >
+              {ipVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+          <div className="mt-2 space-y-1 text-sm">
+            {(host?.addresses ?? []).length === 0 && <div className="text-muted-foreground">…</div>}
+            {(host?.addresses ?? []).map((addr) => (
+              <div key={addr} className="font-mono">
+                {ipVisible ? addr : "•".repeat(Math.min(addr.length, 12))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1793,6 +2129,12 @@ function App() {
             })}
           </div>
         </section>
+
+        <HostingStatsPanel
+          host={metrics?.host}
+          managerMemBytes={metrics?.memory.heap_alloc_bytes}
+          goroutines={metrics?.go.goroutines}
+        />
       </main>
 
       {createOpen && (

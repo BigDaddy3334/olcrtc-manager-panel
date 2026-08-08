@@ -2181,6 +2181,418 @@ type Metrics struct {
 	Memory   MemoryMetrics `json:"memory"`
 	Manager  RuntimeState  `json:"manager"`
 	Children []ChildMetric `json:"children"`
+	Host     HostMetrics   `json:"host"`
+}
+
+// HostMetrics reports host-level (VPS) resource usage, independent from the
+// olcrtc-manager Go process itself: CPU, RAM, swap, disk, network throughput,
+// open socket counts, uptime and the server's own addresses. It is rendered
+// as the "hosting statistics" panel at the bottom of the admin UI.
+type HostMetrics struct {
+	CPU         CPUMetrics     `json:"cpu"`
+	Memory      HostMemory     `json:"memory"`
+	Swap        HostSwap       `json:"swap"`
+	Disk        HostDisk       `json:"disk"`
+	Network     NetworkMetrics `json:"network"`
+	Connections ConnMetrics    `json:"connections"`
+	Uptime      UptimeMetrics  `json:"uptime"`
+	Addresses   []string       `json:"addresses"`
+}
+
+type CPUMetrics struct {
+	UsagePercent float64 `json:"usage_percent"`
+	Cores        int     `json:"cores"`
+	Threads      int     `json:"threads"`
+	ModelName    string  `json:"model_name,omitempty"`
+	MHz          float64 `json:"mhz,omitempty"`
+}
+
+type HostMemory struct {
+	TotalBytes uint64  `json:"total_bytes"`
+	UsedBytes  uint64  `json:"used_bytes"`
+	Percent    float64 `json:"percent"`
+}
+
+type HostSwap struct {
+	TotalBytes uint64  `json:"total_bytes"`
+	UsedBytes  uint64  `json:"used_bytes"`
+	Percent    float64 `json:"percent"`
+}
+
+type HostDisk struct {
+	Path       string  `json:"path"`
+	TotalBytes uint64  `json:"total_bytes"`
+	UsedBytes  uint64  `json:"used_bytes"`
+	FreeBytes  uint64  `json:"free_bytes"`
+	Percent    float64 `json:"percent"`
+}
+
+type NetSample struct {
+	Time        string  `json:"time"`
+	RxRateBytes float64 `json:"rx_rate_bytes_sec"`
+	TxRateBytes float64 `json:"tx_rate_bytes_sec"`
+}
+
+type NetworkMetrics struct {
+	RxBytesTotal   uint64      `json:"rx_bytes_total"`
+	TxBytesTotal   uint64      `json:"tx_bytes_total"`
+	RxRateBytesSec float64     `json:"rx_rate_bytes_sec"`
+	TxRateBytesSec float64     `json:"tx_rate_bytes_sec"`
+	RxPeakBytesSec float64     `json:"rx_peak_bytes_sec"`
+	TxPeakBytesSec float64     `json:"tx_peak_bytes_sec"`
+	History        []NetSample `json:"history"`
+}
+
+type ConnMetrics struct {
+	TCP   int `json:"tcp"`
+	UDP   int `json:"udp"`
+	Total int `json:"total"`
+}
+
+type UptimeMetrics struct {
+	OSUptimeSeconds      uint64 `json:"os_uptime_seconds"`
+	ManagerUptimeSeconds uint64 `json:"manager_uptime_seconds"`
+}
+
+// hostMetricsHistoryLimit bounds how many network throughput samples are kept
+// in memory for the sparkline on the panel's hosting statistics widget.
+const hostMetricsHistoryLimit = 120
+
+// hostMetricsState carries the previous CPU/network samples across polls so
+// that /api/metrics can report instantaneous rates instead of raw counters.
+type hostMetricsState struct {
+	mu sync.Mutex
+
+	haveCPU  bool
+	cpuIdle  uint64
+	cpuTotal uint64
+
+	haveNet bool
+	netTime time.Time
+	netRx   uint64
+	netTx   uint64
+	rxPeak  float64
+	txPeak  float64
+	history []NetSample
+}
+
+var globalHostMetricsState = &hostMetricsState{}
+
+func collectHostMetrics() HostMetrics {
+	host := HostMetrics{
+		CPU:         readCPUMetrics(),
+		Memory:      readHostMemory(),
+		Swap:        readHostSwap(),
+		Disk:        readHostDisk("/"),
+		Network:     readNetworkMetrics(),
+		Connections: readConnMetrics(),
+		Uptime:      readUptimeMetrics(),
+		Addresses:   hostAddresses(),
+	}
+	return host
+}
+
+func readCPUMetrics() CPUMetrics {
+	m := CPUMetrics{Threads: runtime.NumCPU(), Cores: runtime.NumCPU()}
+
+	if data, err := os.ReadFile("/proc/stat"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "cpu ") {
+				continue
+			}
+			fields := strings.Fields(line)[1:]
+			var total uint64
+			var idle uint64
+			for i, f := range fields {
+				v, err := strconv.ParseUint(f, 10, 64)
+				if err != nil {
+					continue
+				}
+				total += v
+				if i == 3 || i == 4 { // idle + iowait
+					idle += v
+				}
+			}
+
+			globalHostMetricsState.mu.Lock()
+			if globalHostMetricsState.haveCPU {
+				deltaTotal := total - globalHostMetricsState.cpuTotal
+				deltaIdle := idle - globalHostMetricsState.cpuIdle
+				if deltaTotal > 0 {
+					busy := float64(deltaTotal-deltaIdle) / float64(deltaTotal) * 100
+					if busy < 0 {
+						busy = 0
+					}
+					if busy > 100 {
+						busy = 100
+					}
+					m.UsagePercent = busy
+				}
+			}
+			globalHostMetricsState.cpuTotal = total
+			globalHostMetricsState.cpuIdle = idle
+			globalHostMetricsState.haveCPU = true
+			globalHostMetricsState.mu.Unlock()
+			break
+		}
+	}
+
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		physicalIDs := map[string]map[string]bool{}
+		currentPhysical := "0"
+		for _, line := range strings.Split(string(data), "\n") {
+			switch {
+			case strings.HasPrefix(line, "physical id"):
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+					currentPhysical = strings.TrimSpace(parts[1])
+				}
+			case strings.HasPrefix(line, "core id"):
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+					coreID := strings.TrimSpace(parts[1])
+					if physicalIDs[currentPhysical] == nil {
+						physicalIDs[currentPhysical] = map[string]bool{}
+					}
+					physicalIDs[currentPhysical][coreID] = true
+				}
+			case strings.HasPrefix(line, "model name") && m.ModelName == "":
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+					m.ModelName = strings.TrimSpace(parts[1])
+				}
+			case strings.HasPrefix(line, "cpu MHz") && m.MHz == 0:
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+					if v, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil {
+						m.MHz = v
+					}
+				}
+			}
+		}
+		if len(physicalIDs) > 0 {
+			cores := 0
+			for _, coreIDs := range physicalIDs {
+				cores += len(coreIDs)
+			}
+			if cores > 0 {
+				m.Cores = cores
+			}
+		}
+	}
+
+	return m
+}
+
+func readHostMemory() HostMemory {
+	values := readMeminfo()
+	total := values["MemTotal"] * 1024
+	available := values["MemAvailable"] * 1024
+	if available == 0 {
+		available = (values["MemFree"] + values["Buffers"] + values["Cached"]) * 1024
+	}
+	used := uint64(0)
+	if total > available {
+		used = total - available
+	}
+	m := HostMemory{TotalBytes: total, UsedBytes: used}
+	if total > 0 {
+		m.Percent = float64(used) / float64(total) * 100
+	}
+	return m
+}
+
+func readHostSwap() HostSwap {
+	values := readMeminfo()
+	total := values["SwapTotal"] * 1024
+	free := values["SwapFree"] * 1024
+	used := uint64(0)
+	if total > free {
+		used = total - free
+	}
+	s := HostSwap{TotalBytes: total, UsedBytes: used}
+	if total > 0 {
+		s.Percent = float64(used) / float64(total) * 100
+	}
+	return s
+}
+
+func readMeminfo() map[string]uint64 {
+	values := map[string]uint64{}
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return values
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		fields := strings.Fields(parts[1])
+		if len(fields) == 0 {
+			continue
+		}
+		v, err := strconv.ParseUint(fields[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		values[key] = v
+	}
+	return values
+}
+
+func readHostDisk(path string) HostDisk {
+	d := HostDisk{Path: path}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return d
+	}
+	blockSize := uint64(stat.Bsize)
+	d.TotalBytes = stat.Blocks * blockSize
+	d.FreeBytes = stat.Bavail * blockSize
+	if d.TotalBytes > d.FreeBytes {
+		d.UsedBytes = d.TotalBytes - d.FreeBytes
+	}
+	if d.TotalBytes > 0 {
+		d.Percent = float64(d.UsedBytes) / float64(d.TotalBytes) * 100
+	}
+	return d
+}
+
+func readNetworkMetrics() NetworkMetrics {
+	var rxTotal, txTotal uint64
+	if data, err := os.ReadFile("/proc/net/dev"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines[2:] {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			iface := strings.TrimSpace(parts[0])
+			if iface == "lo" || iface == "" {
+				continue
+			}
+			fields := strings.Fields(parts[1])
+			if len(fields) < 16 {
+				continue
+			}
+			rx, err1 := strconv.ParseUint(fields[0], 10, 64)
+			tx, err2 := strconv.ParseUint(fields[8], 10, 64)
+			if err1 == nil {
+				rxTotal += rx
+			}
+			if err2 == nil {
+				txTotal += tx
+			}
+		}
+	}
+
+	now := time.Now()
+	net := NetworkMetrics{RxBytesTotal: rxTotal, TxBytesTotal: txTotal}
+
+	globalHostMetricsState.mu.Lock()
+	defer globalHostMetricsState.mu.Unlock()
+
+	if globalHostMetricsState.haveNet {
+		elapsed := now.Sub(globalHostMetricsState.netTime).Seconds()
+		if elapsed > 0 {
+			if rxTotal >= globalHostMetricsState.netRx {
+				net.RxRateBytesSec = float64(rxTotal-globalHostMetricsState.netRx) / elapsed
+			}
+			if txTotal >= globalHostMetricsState.netTx {
+				net.TxRateBytesSec = float64(txTotal-globalHostMetricsState.netTx) / elapsed
+			}
+		}
+	}
+
+	if net.RxRateBytesSec > globalHostMetricsState.rxPeak {
+		globalHostMetricsState.rxPeak = net.RxRateBytesSec
+	}
+	if net.TxRateBytesSec > globalHostMetricsState.txPeak {
+		globalHostMetricsState.txPeak = net.TxRateBytesSec
+	}
+
+	globalHostMetricsState.history = append(globalHostMetricsState.history, NetSample{
+		Time:        now.UTC().Format(time.RFC3339),
+		RxRateBytes: net.RxRateBytesSec,
+		TxRateBytes: net.TxRateBytesSec,
+	})
+	if len(globalHostMetricsState.history) > hostMetricsHistoryLimit {
+		globalHostMetricsState.history = globalHostMetricsState.history[len(globalHostMetricsState.history)-hostMetricsHistoryLimit:]
+	}
+
+	net.RxPeakBytesSec = globalHostMetricsState.rxPeak
+	net.TxPeakBytesSec = globalHostMetricsState.txPeak
+	net.History = append([]NetSample(nil), globalHostMetricsState.history...)
+
+	globalHostMetricsState.netTime = now
+	globalHostMetricsState.netRx = rxTotal
+	globalHostMetricsState.netTx = txTotal
+	globalHostMetricsState.haveNet = true
+
+	return net
+}
+
+func readConnMetrics() ConnMetrics {
+	c := ConnMetrics{}
+	c.TCP = countProcNetEntries("/proc/net/tcp") + countProcNetEntries("/proc/net/tcp6")
+	c.UDP = countProcNetEntries("/proc/net/udp") + countProcNetEntries("/proc/net/udp6")
+	c.Total = c.TCP + c.UDP
+	return c
+}
+
+func countProcNetEntries(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) <= 1 {
+		return 0
+	}
+	count := 0
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func readUptimeMetrics() UptimeMetrics {
+	u := UptimeMetrics{
+		ManagerUptimeSeconds: uint64(time.Since(managerStartedAt).Seconds()),
+	}
+	data, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return u
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return u
+	}
+	if v, err := strconv.ParseFloat(fields[0], 64); err == nil {
+		u.OSUptimeSeconds = uint64(v)
+	}
+	return u
+}
+
+func hostAddresses() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipNet.IP
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			continue
+		}
+		out = append(out, ip.String())
+	}
+	sort.Strings(out)
+	return out
 }
 
 type GoMetrics struct {
@@ -2231,6 +2643,7 @@ func collectMetrics(supervisor *Supervisor) Metrics {
 			PID:       os.Getpid(),
 			StartedAt: managerStartedAt.UTC().Format(time.RFC3339),
 		},
+		Host: collectHostMetrics(),
 	}
 
 	supervisor.mu.RLock()
